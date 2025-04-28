@@ -13,7 +13,16 @@ import triton
 import triton.language as tl
 
 from sglang.srt.layers.moe.topk import select_experts
-from sglang.srt.layers.quantization.fp8_kernel import scaled_fp8_quant
+from sglang.srt.layers.quantization.fp8_kernel import (
+    per_token_group_quant_fp8,
+    scaled_fp8_quant,
+    sglang_per_token_group_quant_fp8,
+)
+from sglang.srt.layers.quantization.int8_kernel import (
+    per_token_group_quant_int8,
+    per_token_quant_int8,
+    sglang_per_token_group_quant_int8,
+)
 from sglang.srt.utils import (
     direct_register_custom_op,
     get_bool_env_var,
@@ -36,7 +45,7 @@ if _is_cuda or _is_hip:
 
 
 logger = logging.getLogger(__name__)
-padding_size = 128 if bool(int(os.getenv("MOE_PADDING", "0"))) else 0
+padding_size = 128 if bool(int(os.getenv("SGLANG_MOE_PADDING", "0"))) else 0
 enable_moe_align_block_size_triton = bool(
     int(os.getenv("ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
 )
@@ -746,18 +755,6 @@ def invoke_fused_moe_kernel(
     block_shape: Optional[List[int]] = None,
     no_combine: bool = False,
 ) -> None:
-    from sglang.srt.layers.quantization.int8_kernel import (
-        per_token_group_quant_int8,
-        per_token_quant_int8,
-    )
-
-    if _is_cuda:
-        from sglang.srt.layers.quantization.fp8_kernel import (
-            sglang_per_token_group_quant_fp8,
-        )
-    else:
-        from sglang.srt.layers.quantization.fp8_kernel import per_token_group_quant_fp8
-
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
@@ -794,7 +791,10 @@ def invoke_fused_moe_kernel(
             # activation block-wise int8 quantization
             assert len(block_shape) == 2
             block_n, block_k = block_shape[0], block_shape[1]
-            A, A_scale = per_token_group_quant_int8(A, block_k)
+            if _is_cuda:
+                A, A_scale = sglang_per_token_group_quant_int8(A, block_k)
+            else:
+                A, A_scale = per_token_group_quant_int8(A, block_k)
             assert triton.cdiv(A.shape[-1], block_k) == A_scale.shape[-1]
             assert triton.cdiv(B.shape[-2], block_n) == B_scale.shape[-2]
             assert triton.cdiv(B.shape[-1], block_k) == B_scale.shape[-1]
@@ -1327,7 +1327,7 @@ def fused_experts_impl(
     if (
         not (use_fp8_w8a8 or use_int8_w8a8)
         or block_shape is not None
-        or (_is_hip and get_bool_env_var("CK_MOE"))
+        or (_is_hip and get_bool_env_var("SGLANG_AITER_MOE"))
     ):
         padded_size = 0
 
